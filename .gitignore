@@ -1,0 +1,24 @@
+# Dependencies
+/vendor
+
+# OS
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# IDEs
+/.idea
+/.vscode
+/.fleet
+/.zed
+.phpactor.json
+
+# Composer
+composer.lock
+
+# Cache
+.phpunit.result.cache
+/.phpunit.cache
+
+# Logs
+*.log
