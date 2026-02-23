@@ -8,7 +8,7 @@ use GuzzleHttp\Exception\GuzzleException;
 class OctoSqueeze
 {
     protected string $apiKey;
-    protected string $endpointUri = 'https://api.octosqueeze.com/v1';
+    protected string $endpointUri = 'https://app.octosqueeze.com/api/v1';
     protected array $httpClientConfig = [];
     protected array $options = [];
     protected ?Client $httpClient = null;
@@ -26,6 +26,7 @@ class OctoSqueeze
     public function setEndpointUri(string $uri): self
     {
         $this->endpointUri = rtrim($uri, '/');
+        $this->httpClient = null; // Reset client to use new URI
         return $this;
     }
 
@@ -46,12 +47,19 @@ class OctoSqueeze
     {
         if ($this->httpClient === null) {
             $this->httpClient = new Client(array_merge([
-                'base_uri' => $this->endpointUri,
                 'timeout' => 30,
             ], $this->httpClientConfig));
         }
 
         return $this->httpClient;
+    }
+
+    /**
+     * Build full URL from endpoint + path.
+     */
+    protected function url(string $path): string
+    {
+        return $this->endpointUri . '/' . ltrim($path, '/');
     }
 
     protected function getHeaders(): array
@@ -89,7 +97,7 @@ class OctoSqueeze
     public function squeezeUrl(array $items): array
     {
         try {
-            $response = $this->getHttpClient()->request('POST', '/compress-batch', [
+            $response = $this->getHttpClient()->request('POST', $this->url('compress-batch'), [
                 'headers' => $this->getHeaders(),
                 'json' => [
                     'items' => $items,
@@ -126,7 +134,7 @@ class OctoSqueeze
         }
 
         try {
-            $response = $this->getHttpClient()->request('POST', '/compress', [
+            $response = $this->getHttpClient()->request('POST', $this->url('compress'), [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $this->apiKey,
                     'Accept' => 'application/json',
@@ -165,7 +173,7 @@ class OctoSqueeze
     public function getStatus(string $jobId): array
     {
         try {
-            $response = $this->getHttpClient()->request('GET', '/status/' . $jobId, [
+            $response = $this->getHttpClient()->request('GET', $this->url('status/' . $jobId), [
                 'headers' => $this->getHeaders(),
             ]);
 
@@ -190,7 +198,7 @@ class OctoSqueeze
     public function getUsage(): array
     {
         try {
-            $response = $this->getHttpClient()->request('GET', '/usage', [
+            $response = $this->getHttpClient()->request('GET', $this->url('usage'), [
                 'headers' => $this->getHeaders(),
             ]);
 
