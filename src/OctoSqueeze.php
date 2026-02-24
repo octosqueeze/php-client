@@ -8,7 +8,7 @@ use GuzzleHttp\Exception\GuzzleException;
 class OctoSqueeze
 {
     protected string $apiKey;
-    protected string $endpointUri = 'https://app.octosqueeze.com/api/v1';
+    protected string $endpointUri = 'https://api.octosqueeze.com/api/v1';
     protected array $httpClientConfig = [];
     protected array $options = [];
     protected ?Client $httpClient = null;

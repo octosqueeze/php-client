@@ -41,7 +41,7 @@ use OctoSqueeze\Client\OctoSqueeze;
 $client = OctoSqueeze::client('your-api-key');
 
 // Optional: Set custom endpoint (for self-hosted or testing)
-$client->setEndpointUri('https://app.octosqueeze.com/api/v1');
+$client->setEndpointUri('https://api.octosqueeze.com/api/v1');
 
 // Optional: Set default options
 $client->setOptions([
