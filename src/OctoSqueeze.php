@@ -134,22 +134,30 @@ class OctoSqueeze
         }
 
         try {
+            $merged = array_merge($this->options, $options);
+
+            $multipart = [
+                [
+                    'name' => 'file',
+                    'contents' => fopen($filePath, 'r'),
+                    'filename' => basename($filePath),
+                ],
+            ];
+
+            if (!empty($merged['mode'])) {
+                $multipart[] = ['name' => 'mode', 'contents' => $merged['mode']];
+            }
+
+            if (!empty($merged['formats'])) {
+                $multipart[] = ['name' => 'format', 'contents' => $merged['formats'][0]];
+            }
+
             $response = $this->getHttpClient()->request('POST', $this->url('compress'), [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $this->apiKey,
                     'Accept' => 'application/json',
                 ],
-                'multipart' => [
-                    [
-                        'name' => 'file',
-                        'contents' => fopen($filePath, 'r'),
-                        'filename' => basename($filePath),
-                    ],
-                    [
-                        'name' => 'options',
-                        'contents' => json_encode(array_merge($this->options, $options)),
-                    ],
-                ],
+                'multipart' => $multipart,
             ]);
 
             $body = json_decode($response->getBody()->getContents(), true);
