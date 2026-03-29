@@ -95,7 +95,14 @@ if ($result['state']) {
 ### Download Compressed Image
 
 ```php
-$content = $client->download($result['items'][0]['download_url']);
+$result = $client->download($downloadUrl);
+
+if ($result['state']) {
+    file_put_contents('/path/to/output.webp', $result['data']);
+}
+
+// Or use the convenience method that returns raw content or null:
+$content = $client->downloadRaw($downloadUrl);
 
 if ($content) {
     file_put_contents('/path/to/output.webp', $content);

@@ -3,7 +3,12 @@
 namespace OctoSqueeze\Client;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Exception\RequestException;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 
 class OctoSqueeze
 {
@@ -46,12 +51,50 @@ class OctoSqueeze
     protected function getHttpClient(): Client
     {
         if ($this->httpClient === null) {
+            $stack = HandlerStack::create();
+            $stack->push(Middleware::retry($this->retryDecider(), $this->retryDelay()));
+
             $this->httpClient = new Client(array_merge([
                 'timeout' => 30,
+                'handler' => $stack,
             ], $this->httpClientConfig));
         }
 
         return $this->httpClient;
+    }
+
+    protected function retryDecider(): callable
+    {
+        return function (int $retries, RequestInterface $request, ?ResponseInterface $response, ?\Throwable $exception): bool {
+            if ($retries >= 2) {
+                return false;
+            }
+
+            if ($response && in_array($response->getStatusCode(), [429, 502, 503, 504])) {
+                return true;
+            }
+
+            if ($exception instanceof \GuzzleHttp\Exception\ConnectException) {
+                return true;
+            }
+
+            return false;
+        };
+    }
+
+    protected function retryDelay(): callable
+    {
+        return function (int $retries, ?ResponseInterface $response): int {
+            if ($response && $response->getStatusCode() === 429) {
+                $retryAfter = $response->getHeaderLine('Retry-After');
+                if ($retryAfter && is_numeric($retryAfter)) {
+                    return (int) ($retryAfter * 1000);
+                }
+            }
+
+            // Exponential backoff: 1s, 2s
+            return (int) pow(2, $retries) * 1000;
+        };
     }
 
     /**
@@ -60,6 +103,28 @@ class OctoSqueeze
     protected function url(string $path): string
     {
         return $this->endpointUri . '/' . ltrim($path, '/');
+    }
+
+    /**
+     * Sanitize exception message to avoid leaking sensitive data (API keys in Guzzle headers).
+     */
+    protected function sanitizeExceptionMessage(GuzzleException $e): string
+    {
+        if ($e instanceof RequestException && $e->getResponse()) {
+            $status = $e->getResponse()->getStatusCode();
+            $body = (string) $e->getResponse()->getBody();
+            $decoded = json_decode($body, true);
+            $serverMessage = $decoded['error']['message'] ?? $decoded['message'] ?? null;
+
+            if ($serverMessage) {
+                return $serverMessage;
+            }
+
+            return "HTTP {$status} error from API";
+        }
+
+        // Generic messages without internals
+        return 'Request to OctoSqueeze API failed: ' . $e->getCode();
     }
 
     protected function getHeaders(): array
@@ -115,7 +180,7 @@ class OctoSqueeze
         } catch (GuzzleException $e) {
             return [
                 'state' => false,
-                'error' => $e->getMessage(),
+                'error' => $this->sanitizeExceptionMessage($e),
                 'code' => $e->getCode(),
             ];
         }
@@ -149,7 +214,8 @@ class OctoSqueeze
             }
 
             if (!empty($merged['formats'])) {
-                $multipart[] = ['name' => 'format', 'contents' => $merged['formats'][0]];
+                $formats = (array) $merged['formats'];
+                $multipart[] = ['name' => 'format', 'contents' => $formats[0]];
             }
 
             $response = $this->getHttpClient()->request('POST', $this->url('compress'), [
@@ -169,7 +235,7 @@ class OctoSqueeze
         } catch (GuzzleException $e) {
             return [
                 'state' => false,
-                'error' => $e->getMessage(),
+                'error' => $this->sanitizeExceptionMessage($e),
                 'code' => $e->getCode(),
             ];
         }
@@ -194,7 +260,7 @@ class OctoSqueeze
         } catch (GuzzleException $e) {
             return [
                 'state' => false,
-                'error' => $e->getMessage(),
+                'error' => $this->sanitizeExceptionMessage($e),
                 'code' => $e->getCode(),
             ];
         }
@@ -219,7 +285,7 @@ class OctoSqueeze
         } catch (GuzzleException $e) {
             return [
                 'state' => false,
-                'error' => $e->getMessage(),
+                'error' => $this->sanitizeExceptionMessage($e),
                 'code' => $e->getCode(),
             ];
         }
@@ -227,19 +293,37 @@ class OctoSqueeze
 
     /**
      * Download compressed image from OctoSqueeze
+     *
+     * @return array{state: bool, data?: string, error?: string, code?: int}
      */
-    public function download(string $downloadUrl): ?string
+    public function download(string $downloadUrl): array
     {
         try {
-            $response = $this->getHttpClient()->request('GET', $downloadUrl, [
-                'headers' => [
-                    'Authorization' => 'Bearer ' . $this->apiKey,
-                ],
-            ]);
+            $response = $this->getHttpClient()->request('GET', $downloadUrl);
 
-            return $response->getBody()->getContents();
+            return [
+                'state' => true,
+                'data' => $response->getBody()->getContents(),
+            ];
         } catch (GuzzleException $e) {
-            return null;
+            return [
+                'state' => false,
+                'error' => $this->sanitizeExceptionMessage($e),
+                'code' => $e->getCode(),
+            ];
         }
+    }
+
+    /**
+     * Download compressed image from OctoSqueeze (legacy convenience method)
+     *
+     * Returns the raw content string or null on failure.
+     * Prefer download() for error context.
+     */
+    public function downloadRaw(string $downloadUrl): ?string
+    {
+        $result = $this->download($downloadUrl);
+
+        return $result['state'] ? $result['data'] : null;
     }
 }
