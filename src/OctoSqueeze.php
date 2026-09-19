@@ -155,7 +155,7 @@ class OctoSqueeze
      * @param array $items Array of items, each containing:
      *   - url: string - The image URL
      *   - image_id: mixed - Optional identifier for your system
-     *   - hash: string - Optional hash to skip duplicate compressions
+     *   - hash: string - Optional; passed through, the API does not deduplicate on it
      *   - name: string - Optional filename
      *   - options: array - Optional per-image options
      */
