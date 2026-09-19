@@ -570,6 +570,93 @@ class OctoSqueezeTest extends TestCase
         $this->assertSame('https://cdn.octosqueeze.com/compressed/abc.webp', (string) $history[0]['request']->getUri());
     }
 
+    public function test_download_sends_authorization_bearer_header(): void
+    {
+        $history = [];
+        $client = $this->createMockedClient([
+            new Response(200, [], 'binary-image-data'),
+        ], $history);
+
+        $client->download(self::TEST_ENDPOINT . '/download/job-123');
+
+        $this->assertSame('Bearer ' . self::TEST_API_KEY, $history[0]['request']->getHeaderLine('Authorization'));
+    }
+
+    public function test_download_sends_no_bearer_to_another_host(): void
+    {
+        $history = [];
+        $client = $this->createMockedClient([
+            new Response(200, ['Content-Type' => 'image/webp'], 'binary-image-data'),
+        ], $history);
+
+        $client->download('https://cdn.octosqueeze.com/compressed/abc.webp');
+
+        $this->assertFalse($history[0]['request']->hasHeader('Authorization'));
+    }
+
+    public function test_download_refuses_an_html_page_returned_as_200(): void
+    {
+        $client = $this->createMockedClient([
+            new Response(200, ['Content-Type' => 'text/html; charset=UTF-8'], '<!DOCTYPE html><html>Sign in</html>'),
+            new Response(200, ['Content-Type' => 'text/html; charset=UTF-8'], '<!DOCTYPE html><html>Sign in</html>'),
+        ]);
+
+        $result = $client->download(self::TEST_ENDPOINT . '/download/job-123');
+
+        $this->assertFalse($result['state']);
+        $this->assertArrayNotHasKey('data', $result);
+        $this->assertStringContainsString('text/html', $result['error']);
+        $this->assertNull($client->downloadRaw(self::TEST_ENDPOINT . '/download/job-123'));
+    }
+
+    public function test_download_refuses_a_json_body_returned_as_200(): void
+    {
+        $client = $this->createMockedClient([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode(['success' => false])),
+        ]);
+
+        $result = $client->download(self::TEST_ENDPOINT . '/download/job-123');
+
+        $this->assertFalse($result['state']);
+    }
+
+    public function test_download_accepts_a_file_served_as_octet_stream(): void
+    {
+        $client = $this->createMockedClient([
+            new Response(200, ['Content-Type' => 'application/octet-stream'], 'bytes'),
+        ]);
+
+        $result = $client->download(self::TEST_ENDPOINT . '/download/job-123');
+
+        $this->assertTrue($result['state']);
+        $this->assertSame('bytes', $result['data']);
+    }
+
+    public function test_download_sends_accept_json_header(): void
+    {
+        $history = [];
+        $client = $this->createMockedClient([
+            new Response(200, [], 'binary-image-data'),
+        ], $history);
+
+        $client->download(self::TEST_ENDPOINT . '/download/job-123');
+
+        $this->assertSame('application/json', $history[0]['request']->getHeaderLine('Accept'));
+    }
+
+    public function test_download_returns_failure_when_unauthenticated(): void
+    {
+        $client = $this->createMockedClient([
+            new Response(401, ['Content-Type' => 'application/json'], json_encode(['message' => 'Unauthenticated.'])),
+        ]);
+
+        $result = $client->download(self::TEST_ENDPOINT . '/download/job-123');
+
+        $this->assertFalse($result['state']);
+        $this->assertSame('Unauthenticated.', $result['error']);
+        $this->assertSame(401, $result['code']);
+    }
+
     public function test_download_returns_raw_content_on_success(): void
     {
         $binaryContent = random_bytes(64);

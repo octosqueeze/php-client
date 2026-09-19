@@ -299,7 +299,22 @@ class OctoSqueeze
     public function download(string $downloadUrl): array
     {
         try {
-            $response = $this->getHttpClient()->request('GET', $downloadUrl);
+            $response = $this->getHttpClient()->request('GET', $downloadUrl, [
+                'headers' => $this->downloadHeaders($downloadUrl),
+            ]);
+
+            // A page or an error body is never the compressed file. Callers write
+            // whatever comes back over the original, so an HTML login page or a JSON
+            // error returned with a 200 must fail here instead of destroying an image.
+            $contentType = strtolower($response->getHeaderLine('Content-Type'));
+
+            if (str_starts_with($contentType, 'text/html') || str_starts_with($contentType, 'application/json')) {
+                return [
+                    'state' => false,
+                    'error' => 'Download did not return a file (Content-Type: ' . $contentType . ')',
+                    'code' => $response->getStatusCode(),
+                ];
+            }
 
             return [
                 'state' => true,
@@ -312,6 +327,24 @@ class OctoSqueeze
                 'code' => $e->getCode(),
             ];
         }
+    }
+
+    /**
+     * Headers for a download: the bearer goes only to the API's own host (a signed
+     * download URL needs none, and a CDN or third-party URL must never see the key).
+     */
+    protected function downloadHeaders(string $downloadUrl): array
+    {
+        // Auth failures come back as a JSON 401, not a redirect to the web login page
+        $headers = ['Accept' => 'application/json'];
+
+        $host = parse_url($downloadUrl, PHP_URL_HOST);
+
+        if ($host && strcasecmp($host, (string) parse_url($this->endpointUri, PHP_URL_HOST)) === 0) {
+            $headers['Authorization'] = 'Bearer ' . $this->apiKey;
+        }
+
+        return $headers;
     }
 
     /**
