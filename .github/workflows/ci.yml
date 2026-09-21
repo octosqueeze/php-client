@@ -1,0 +1,44 @@
+name: CI
+
+# Every app that compresses images through OctoSqueeze installs this client,
+# so a change here is tested before a tag is cut. The consumer contract itself
+# (compress -> download against the real API code) is octosqueeze-app's
+# tests/Feature/Contract, which that repo's CI also runs every night against
+# this repo's main branch.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # >= 8.1: PHPUnit 10.5 needs it (consumers run 8.3 in production)
+        php: ['8.1', '8.2', '8.3', '8.4']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      # A library has no lock: resolve what a consumer would get today
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Run tests
+        run: vendor/bin/phpunit
