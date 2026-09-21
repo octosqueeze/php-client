@@ -55,13 +55,23 @@ class OctoSqueeze
             $stack->push(Middleware::retry($this->retryDecider(), $this->retryDelay()));
 
             $this->httpClient = new Client(array_merge([
-                'timeout' => 30,
+                // The API waits up to 120 s for the compression engine; giving up
+                // sooner turned a slow compression into a failure the server had
+                // already done (and billed)
+                'timeout' => 125,
+                'connect_timeout' => 10,
                 'handler' => $stack,
             ], $this->httpClientConfig));
         }
 
         return $this->httpClient;
     }
+
+    /**
+     * The 429 codes of a limit that does not clear in seconds: retrying one only
+     * sleeps (Retry-After) and fails again.
+     */
+    protected const LIMITS_THAT_DO_NOT_CLEAR = ['usage_limit_exceeded', 'daily_limit_exceeded'];
 
     protected function retryDecider(): callable
     {
@@ -70,16 +80,85 @@ class OctoSqueeze
                 return false;
             }
 
-            if ($response && in_array($response->getStatusCode(), [429, 502, 503, 504])) {
-                return true;
+            // A compress call is a POST, and the API bills it once it has run. When
+            // it may have run (the connection timed out, or a gateway gave up
+            // waiting for it) sending it again compresses and bills it again.
+            $idempotent = in_array(strtoupper($request->getMethod()), ['GET', 'HEAD', 'OPTIONS'], true);
+
+            if ($response) {
+                $status = $response->getStatusCode();
+
+                if ($status === 429) {
+                    return ! in_array($this->errorCode($response), self::LIMITS_THAT_DO_NOT_CLEAR, true);
+                }
+
+                if (in_array($status, [502, 503], true)) {
+                    return true;
+                }
+
+                if ($status === 504) {
+                    return $idempotent;
+                }
+
+                return false;
             }
 
             if ($exception instanceof \GuzzleHttp\Exception\ConnectException) {
-                return true;
+                // Could not connect (DNS, refused): the API never saw it. Timed out:
+                // it may be compressing it right now.
+                return $idempotent || ! $this->timedOut($exception);
             }
 
             return false;
         };
+    }
+
+    /**
+     * The API's error code from a response body ({success:false, error:{code}}, or
+     * the legacy top-level `code`), leaving the body readable for the caller.
+     */
+    protected function errorCode(ResponseInterface $response): ?string
+    {
+        $body = $response->getBody();
+        $decoded = json_decode((string) $body, true);
+
+        if ($body->isSeekable()) {
+            $body->rewind();
+        }
+
+        $code = is_array($decoded) ? ($decoded['error']['code'] ?? $decoded['code'] ?? null) : null;
+
+        return is_string($code) ? $code : null;
+    }
+
+    /**
+     * Whether a connection failure was a timeout (cURL error 28), as opposed to
+     * never reaching the API.
+     */
+    protected function timedOut(\GuzzleHttp\Exception\ConnectException $exception): bool
+    {
+        $errno = $exception->getHandlerContext()['errno'] ?? null;
+
+        if ($errno !== null) {
+            return (int) $errno === 28;
+        }
+
+        return stripos($exception->getMessage(), 'timed out') !== false
+            || stripos($exception->getMessage(), 'cURL error 28') !== false;
+    }
+
+    /**
+     * Whether a failed request may be sent again without compressing (and
+     * billing) the same image twice: the retry rules, applied by the caller.
+     */
+    public function isRetryable(GuzzleException $e, string $method = 'POST'): bool
+    {
+        $request = $e instanceof RequestException || $e instanceof \GuzzleHttp\Exception\ConnectException
+            ? $e->getRequest()->withMethod($method)
+            : new \GuzzleHttp\Psr7\Request($method, $this->endpointUri);
+        $response = $e instanceof RequestException ? $e->getResponse() : null;
+
+        return ($this->retryDecider())(0, $request, $response, $e);
     }
 
     protected function retryDelay(): callable
@@ -182,6 +261,10 @@ class OctoSqueeze
                 'state' => false,
                 'error' => $this->sanitizeExceptionMessage($e),
                 'code' => $e->getCode(),
+                // Safe to send again? False when the API may already have
+                // compressed (and billed) it: a timeout, a gateway timeout, or a
+                // limit that will not clear. Queued jobs retry only when true.
+                'retryable' => $this->isRetryable($e, 'POST'),
             ];
         }
     }
@@ -237,6 +320,10 @@ class OctoSqueeze
                 'state' => false,
                 'error' => $this->sanitizeExceptionMessage($e),
                 'code' => $e->getCode(),
+                // Safe to send again? False when the API may already have
+                // compressed (and billed) it: a timeout, a gateway timeout, or a
+                // limit that will not clear. Queued jobs retry only when true.
+                'retryable' => $this->isRetryable($e, 'POST'),
             ];
         }
     }

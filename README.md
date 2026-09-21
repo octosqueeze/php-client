@@ -164,10 +164,30 @@ $client->setHttpClientConfig([
     'verify' => false,
 ]);
 
-// Set custom timeout
+// Set custom timeout (default 125 s: the API waits up to 120 s for the engine)
 $client->setHttpClientConfig([
-    'timeout' => 60,
+    'timeout' => 180,
 ]);
+```
+
+### Retries and billing
+
+A request that never reached the API (DNS failure, refused connection), a
+per-minute throttle (`429 rate_limited`), a busy account (`429 too_many_requests`)
+and a `502`/`503` are retried up to twice. A compress call that **timed out** or
+got a `504` is not: the API may already have compressed it, and it bills every
+compression. A monthly or daily limit (`usage_limit_exceeded`,
+`daily_limit_exceeded`) is not retried either — it will not clear in seconds.
+
+A failed `compressFile()` / `compressUrl()` result carries `retryable`: `true`
+only when sending it again cannot compress (and bill) the same image twice.
+
+```php
+$result = $client->compressFile($path);
+
+if (! $result['state'] && $result['retryable']) {
+    // safe to try again later
+}
 ```
 
 ## Links

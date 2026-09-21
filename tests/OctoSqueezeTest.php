@@ -948,6 +948,165 @@ class OctoSqueezeTest extends TestCase
         $this->assertSame(1000, $delay(0, $response)); // Not 429, so exponential
     }
 
+    public function test_the_default_timeout_outlasts_the_apis_120_second_engine_wait(): void
+    {
+        $client = new OctoSqueeze('key');
+        $reflection = new \ReflectionMethod(OctoSqueeze::class, 'getHttpClient');
+        $reflection->setAccessible(true);
+        $http = $reflection->invoke($client);
+
+        $this->assertGreaterThan(120, $http->getConfig('timeout'));
+        $this->assertSame(10, $http->getConfig('connect_timeout'));
+    }
+
+    public function test_a_compress_that_timed_out_is_never_sent_again(): void
+    {
+        $decider = $this->invokeRetryDecider();
+        $post = new Request('POST', 'https://api.test.com/api/v1/compress');
+        $timedOut = new ConnectException('cURL error 28: Operation timed out after 125001 milliseconds', $post, null, ['errno' => 28]);
+
+        $this->assertFalse($decider(0, $post, null, $timedOut));
+    }
+
+    public function test_a_compress_that_never_reached_the_api_is_retried(): void
+    {
+        $decider = $this->invokeRetryDecider();
+        $post = new Request('POST', 'https://api.test.com/api/v1/compress');
+        $refused = new ConnectException('cURL error 7: Failed to connect', $post, null, ['errno' => 7]);
+
+        $this->assertTrue($decider(0, $post, null, $refused));
+    }
+
+    public function test_a_read_that_timed_out_is_retried(): void
+    {
+        $decider = $this->invokeRetryDecider();
+        $get = new Request('GET', 'https://api.test.com/api/v1/status/job-1');
+        $timedOut = new ConnectException('cURL error 28: Operation timed out', $get, null, ['errno' => 28]);
+
+        $this->assertTrue($decider(0, $get, null, $timedOut));
+    }
+
+    public function test_a_timeout_without_handler_context_is_read_from_the_message(): void
+    {
+        $decider = $this->invokeRetryDecider();
+        $post = new Request('POST', 'https://api.test.com/api/v1/compress');
+
+        $this->assertFalse($decider(0, $post, null, new ConnectException('Connection timed out', $post)));
+        $this->assertTrue($decider(0, $post, null, new ConnectException('Connection refused', $post)));
+    }
+
+    public function test_a_gateway_timeout_retries_a_read_but_not_a_compress(): void
+    {
+        $decider = $this->invokeRetryDecider();
+
+        $this->assertFalse($decider(0, new Request('POST', 'https://api.test.com/api/v1/compress'), new Response(504), null));
+        $this->assertTrue($decider(0, new Request('GET', 'https://api.test.com/api/v1/usage'), new Response(504), null));
+        $this->assertTrue($decider(0, new Request('POST', 'https://api.test.com/api/v1/compress'), new Response(503), null));
+    }
+
+    public function test_a_monthly_or_daily_limit_is_not_retried(): void
+    {
+        $decider = $this->invokeRetryDecider();
+        $post = new Request('POST', 'https://api.test.com/api/v1/compress');
+
+        foreach (['usage_limit_exceeded', 'daily_limit_exceeded'] as $code) {
+            $response = new Response(429, ['Retry-After' => '60'], json_encode(['success' => false, 'error' => ['code' => $code, 'message' => 'limit']]));
+
+            $this->assertFalse($decider(0, $post, $response, null), $code);
+            // the caller can still read the error it got
+            $this->assertStringContainsString($code, (string) $response->getBody());
+        }
+
+        // the legacy top-level code (CheckUsageLimits sends both shapes)
+        $legacy = new Response(429, [], json_encode(['state' => 'error', 'code' => 'usage_limit_exceeded']));
+        $this->assertFalse($decider(0, $post, $legacy, null));
+    }
+
+    public function test_a_per_minute_throttle_or_a_busy_account_is_retried(): void
+    {
+        $decider = $this->invokeRetryDecider();
+        $post = new Request('POST', 'https://api.test.com/api/v1/compress');
+
+        foreach (['rate_limited', 'too_many_requests'] as $code) {
+            $response = new Response(429, ['Retry-After' => '1'], json_encode(['success' => false, 'error' => ['code' => $code]]));
+            $this->assertTrue($decider(0, $post, $response, null), $code);
+        }
+
+        $this->assertTrue($decider(0, $post, new Response(429, [], 'Too Many Requests'), null));
+    }
+
+    public function test_through_the_retry_middleware_a_timed_out_compress_is_sent_once(): void
+    {
+        $history = [];
+        $mock = new MockHandler([
+            new ConnectException('cURL error 28: timed out', new Request('POST', 'https://api.test.com/api/v1/compress'), null, ['errno' => 28]),
+            new Response(200, [], json_encode(['success' => true])),
+        ]);
+        // The first middleware pushed is the outermost: retry wraps history, so
+        // history records every attempt that reaches the wire
+        $stack = HandlerStack::create($mock);
+        $stack->push(Middleware::retry($this->invokeRetryDecider(), fn () => 0));
+        $stack->push(Middleware::history($history));
+
+        try {
+            (new \GuzzleHttp\Client(['handler' => $stack]))->post('https://api.test.com/api/v1/compress');
+            $this->fail('the timeout should have reached the caller');
+        } catch (ConnectException) {
+            // expected
+        }
+
+        $this->assertCount(1, $history);
+    }
+
+    public function test_through_the_retry_middleware_a_refused_connection_is_tried_again(): void
+    {
+        $history = [];
+        $mock = new MockHandler([
+            new ConnectException('cURL error 7: refused', new Request('POST', 'https://api.test.com/api/v1/compress'), null, ['errno' => 7]),
+            new Response(200, [], json_encode(['success' => true])),
+        ]);
+        $stack = HandlerStack::create($mock);
+        $stack->push(Middleware::retry($this->invokeRetryDecider(), fn () => 0));
+        $stack->push(Middleware::history($history));
+
+        $response = (new \GuzzleHttp\Client(['handler' => $stack]))->post('https://api.test.com/api/v1/compress');
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertCount(2, $history);
+    }
+
+    public function test_a_failed_compress_says_whether_it_is_safe_to_send_again(): void
+    {
+        $file = tempnam(sys_get_temp_dir(), 'octo');
+        file_put_contents($file, 'image-bytes');
+        $post = new Request('POST', self::TEST_ENDPOINT.'/compress');
+
+        $cases = [
+            'monthly limit' => [new Response(429, [], json_encode(['success' => false, 'error' => ['code' => 'usage_limit_exceeded', 'message' => 'Monthly usage limit reached']])), false],
+            'per-minute throttle' => [new Response(429, [], json_encode(['success' => false, 'error' => ['code' => 'rate_limited', 'message' => 'Too many requests']])), true],
+            'engine unavailable' => [new Response(503, [], json_encode(['success' => false, 'error' => ['code' => 'service_unavailable', 'message' => 'down']])), true],
+            'gateway timeout' => [new Response(504), false],
+            'bad request' => [new Response(422, [], json_encode(['success' => false, 'error' => ['code' => 'validation_failed', 'message' => 'bad']])), false],
+            'timed out' => [new ConnectException('cURL error 28: timed out', $post, null, ['errno' => 28]), false],
+            'refused' => [new ConnectException('cURL error 7: refused', $post, null, ['errno' => 7]), true],
+        ];
+
+        try {
+            foreach ($cases as $name => [$answer, $retryable]) {
+                $result = $this->createMockedClient([$answer])->compressFile($file);
+
+                $this->assertFalse($result['state'], $name);
+                $this->assertSame($retryable, $result['retryable'], $name);
+            }
+
+            // the monthly limit's message still reaches the caller
+            $result = $this->createMockedClient([$cases['monthly limit'][0]])->compressFile($file);
+            $this->assertSame('Monthly usage limit reached', $result['error']);
+        } finally {
+            @unlink($file);
+        }
+    }
+
     // ---------------------------------------------------------------
     //  Headers
     // ---------------------------------------------------------------
